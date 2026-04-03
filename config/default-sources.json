@@ -38,11 +38,5 @@
     }
   ],
   "blogs": [],
-  "x_accounts": [
-    { "name": "Zara Zhang", "handle": "zarazhangrui" },
-    { "name": "Naval Ravikant", "handle": "naval" },
-    { "name": "Alex Gough Cooper", "handle": "alexgoughcooper" },
-    { "name": "Dan Koe", "handle": "thedankoe" },
-    { "name": "Navalism", "handle": "NavalismHQ" }
-  ]
+  "x_accounts": []
 }

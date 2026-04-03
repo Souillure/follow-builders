@@ -74,9 +74,10 @@ async function loadSources() {
 
 // -- YouTube Podcast Fetching (Supadata API) ----------------------------------
 
-// Fetches recent videos from a YouTube channel via Supadata API
-async function fetchChannelVideos(channelHandle, apiKey) {
-  const url = `${SUPADATA_BASE}/youtube/channel?url=${encodeURIComponent('https://www.youtube.com/@' + channelHandle)}`;
+// Fetches recent video IDs from a YouTube channel via Supadata API
+async function fetchChannelVideoIds(channelHandle, apiKey) {
+  // id param accepts @handle format
+  const url = `${SUPADATA_BASE}/youtube/channel/videos?id=${encodeURIComponent('@' + channelHandle)}&type=video&limit=3`;
   const res = await fetch(url, {
     headers: { 'x-api-key': apiKey }
   });
@@ -85,13 +86,22 @@ async function fetchChannelVideos(channelHandle, apiKey) {
     return { error: `HTTP ${res.status}: ${text}` };
   }
   const data = await res.json();
-  // Returns array of video objects with id, title, date, etc.
-  return { videos: data.items || data.videos || data || [] };
+  return { videoIds: data.videoIds || [] };
+}
+
+// Fetches metadata for a single YouTube video via Supadata API
+async function fetchVideoMetadata(videoId, apiKey) {
+  const url = `${SUPADATA_BASE}/youtube/video?id=${encodeURIComponent(videoId)}`;
+  const res = await fetch(url, {
+    headers: { 'x-api-key': apiKey }
+  });
+  if (!res.ok) return null;
+  return res.json();
 }
 
 // Fetches transcript for a YouTube video via Supadata API
 async function fetchYouTubeTranscript(videoId, apiKey) {
-  const url = `${SUPADATA_BASE}/youtube/transcript?url=${encodeURIComponent('https://youtube.com/watch?v=' + videoId)}&text=true`;
+  const url = `${SUPADATA_BASE}/youtube/transcript?videoId=${encodeURIComponent(videoId)}&text=true`;
   const res = await fetch(url, {
     headers: { 'x-api-key': apiKey }
   });
@@ -100,8 +110,7 @@ async function fetchYouTubeTranscript(videoId, apiKey) {
     return { error: `HTTP ${res.status}: ${text}` };
   }
   const data = await res.json();
-  // text=true returns { content: "full transcript text" }
-  const transcript = data.content || data.transcript || data.text || '';
+  const transcript = typeof data.content === 'string' ? data.content : '';
   return transcript ? { transcript } : { error: 'Empty transcript' };
 }
 
@@ -121,7 +130,7 @@ async function fetchPodcastContent(podcasts, apiKey, state, errors) {
 
     try {
       console.error(`  Fetching videos for ${podcast.name} (@${podcast.channelHandle})...`);
-      const result = await fetchChannelVideos(podcast.channelHandle, apiKey);
+      const result = await fetchChannelVideoIds(podcast.channelHandle, apiKey);
 
       if (result.error) {
         console.error(`    Error: ${result.error}`);
@@ -129,27 +138,31 @@ async function fetchPodcastContent(podcasts, apiKey, state, errors) {
         continue;
       }
 
-      const videos = Array.isArray(result.videos) ? result.videos : [];
-      console.error(`    Found ${videos.length} videos`);
+      const videoIds = result.videoIds || [];
+      console.error(`    Found ${videoIds.length} video IDs`);
 
       // Check the 3 most recent, skip already-seen ones
-      for (const video of videos.slice(0, 3)) {
-        const videoId = video.id || video.videoId;
-        if (!videoId) continue;
+      for (const videoId of videoIds.slice(0, 3)) {
         if (state.seenVideos[videoId]) {
-          console.error(`    Skipping "${video.title}" (already seen)`);
+          console.error(`    Skipping ${videoId} (already seen)`);
           continue;
         }
 
-        const publishedAt = video.date || video.publishedAt || video.publishDate || null;
-        console.error(`    Candidate: "${video.title}" published=${publishedAt || 'unknown'}`);
+        // Fetch metadata for this video
+        const meta = await fetchVideoMetadata(videoId, apiKey);
+        const title = meta?.title || 'Untitled';
+        const publishedAt = meta?.uploadDate || null;
+        console.error(`    Candidate: "${title}" published=${publishedAt || 'unknown'}`);
+
         allCandidates.push({
           podcast,
           videoId,
-          title: video.title || 'Untitled',
+          title,
           publishedAt,
           url: `https://youtube.com/watch?v=${videoId}`
         });
+
+        await new Promise(r => setTimeout(r, 200));
       }
 
       await new Promise(r => setTimeout(r, 300));

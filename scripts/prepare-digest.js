@@ -1,16 +1,11 @@
 #!/usr/bin/env node
 
 // ============================================================================
-// Follow Builders — Prepare Digest
+// Follow Builders — Prepare Digest (Hybrid)
 // ============================================================================
-// Gathers everything the LLM needs to produce a digest:
-// - Fetches the central feeds (tweets + podcasts)
-// - Fetches the latest prompts from GitHub
-// - Reads the user's config (language, delivery method)
-// - Outputs a single JSON blob to stdout
-//
-// The LLM's ONLY job is to read this JSON, remix the content, and output
-// the digest text. Everything else is handled here deterministically.
+// Merges two feed sources:
+// 1. Central feeds from zarazhangrui (X tweets, podcasts, blogs)
+// 2. Custom YouTube feeds from user's fork (extra podcasts)
 //
 // Usage: node prepare-digest.js
 // Output: JSON to stdout
@@ -26,11 +21,16 @@ import { homedir } from 'os';
 const USER_DIR = join(homedir(), '.follow-builders');
 const CONFIG_PATH = join(USER_DIR, 'config.json');
 
-const FEED_X_URL = 'https://raw.githubusercontent.com/Souillure/follow-builders/main/feed-x.json';
-const FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/Souillure/follow-builders/main/feed-podcasts.json';
-const FEED_BLOGS_URL = 'https://raw.githubusercontent.com/Souillure/follow-builders/main/feed-blogs.json';
+// Central feeds (zarazhangrui's — X tweets, podcasts, blogs)
+const CENTRAL_FEED_X_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json';
+const CENTRAL_FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json';
+const CENTRAL_FEED_BLOGS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-blogs.json';
 
-const PROMPTS_BASE = 'https://raw.githubusercontent.com/Souillure/follow-builders/main/prompts';
+// Custom feeds (user's fork — extra YouTube channels)
+const CUSTOM_FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/Souillure/follow-builders/main/feed-podcasts.json';
+
+// Prompts from the central repo (always up to date)
+const PROMPTS_BASE = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/prompts';
 const PROMPT_FILES = [
   'summarize-podcast.md',
   'summarize-tweets.md',
@@ -72,23 +72,32 @@ async function main() {
     }
   }
 
-  // 2. Fetch all three feeds
-  const [feedX, feedPodcasts, feedBlogs] = await Promise.all([
-    fetchJSON(FEED_X_URL),
-    fetchJSON(FEED_PODCASTS_URL),
-    fetchJSON(FEED_BLOGS_URL)
+  // 2. Fetch all feeds (central + custom) in parallel
+  const [feedX, centralPodcasts, feedBlogs, customPodcasts] = await Promise.all([
+    fetchJSON(CENTRAL_FEED_X_URL),
+    fetchJSON(CENTRAL_FEED_PODCASTS_URL),
+    fetchJSON(CENTRAL_FEED_BLOGS_URL),
+    fetchJSON(CUSTOM_FEED_PODCASTS_URL)
   ]);
 
   if (!feedX) errors.push('Could not fetch tweet feed');
-  if (!feedPodcasts) errors.push('Could not fetch podcast feed');
+  if (!centralPodcasts) errors.push('Could not fetch central podcast feed');
   if (!feedBlogs) errors.push('Could not fetch blog feed');
+  if (!customPodcasts) errors.push('Could not fetch custom podcast feed');
 
-  // 3. Load prompts with priority: user custom > remote (GitHub) > local default
-  //
-  // If the user has a custom prompt at ~/.follow-builders/prompts/<file>,
-  // use that (they personalized it — don't overwrite with remote updates).
-  // Otherwise, fetch the latest from GitHub so they get central improvements.
-  // If GitHub is unreachable, fall back to the local copy shipped with the skill.
+  // 3. Merge podcast feeds (central + custom, deduplicated by title)
+  const centralEpisodes = centralPodcasts?.podcasts || [];
+  const customEpisodes = customPodcasts?.podcasts || [];
+  const seenTitles = new Set(centralEpisodes.map(e => e.title));
+  const mergedPodcasts = [...centralEpisodes];
+  for (const ep of customEpisodes) {
+    if (!seenTitles.has(ep.title)) {
+      mergedPodcasts.push(ep);
+      seenTitles.add(ep.title);
+    }
+  }
+
+  // 4. Load prompts with priority: user custom > remote (GitHub) > local default
   const prompts = {};
   const scriptDir = decodeURIComponent(new URL('.', import.meta.url).pathname);
   const localPromptsDir = join(scriptDir, '..', 'prompts');
@@ -99,20 +108,17 @@ async function main() {
     const userPath = join(userPromptsDir, filename);
     const localPath = join(localPromptsDir, filename);
 
-    // Priority 1: user's custom prompt (they personalized it)
     if (existsSync(userPath)) {
       prompts[key] = await readFile(userPath, 'utf-8');
       continue;
     }
 
-    // Priority 2: latest from GitHub (central updates)
     const remote = await fetchText(`${PROMPTS_BASE}/${filename}`);
     if (remote) {
       prompts[key] = remote;
       continue;
     }
 
-    // Priority 3: local copy shipped with the skill
     if (existsSync(localPath)) {
       prompts[key] = await readFile(localPath, 'utf-8');
     } else {
@@ -120,36 +126,33 @@ async function main() {
     }
   }
 
-  // 4. Build the output — everything the LLM needs in one blob
+  // 5. Build the output
+  const x = feedX?.x || [];
+  const blogs = feedBlogs?.blogs || [];
+
   const output = {
     status: 'ok',
     generatedAt: new Date().toISOString(),
 
-    // User preferences
     config: {
       language: config.language || 'en',
       frequency: config.frequency || 'daily',
       delivery: config.delivery || { method: 'stdout' }
     },
 
-    // Content to remix
-    podcasts: feedPodcasts?.podcasts || [],
-    x: feedX?.x || [],
-    blogs: feedBlogs?.blogs || [],
+    podcasts: mergedPodcasts,
+    x,
+    blogs,
 
-    // Stats for the LLM to reference
     stats: {
-      podcastEpisodes: feedPodcasts?.podcasts?.length || 0,
-      xBuilders: feedX?.x?.length || 0,
-      totalTweets: (feedX?.x || []).reduce((sum, a) => sum + a.tweets.length, 0),
-      blogPosts: feedBlogs?.blogs?.length || 0,
-      feedGeneratedAt: feedX?.generatedAt || feedPodcasts?.generatedAt || feedBlogs?.generatedAt || null
+      podcastEpisodes: mergedPodcasts.length,
+      xBuilders: x.length,
+      totalTweets: x.reduce((sum, a) => sum + a.tweets.length, 0),
+      blogPosts: blogs.length,
+      feedGeneratedAt: feedX?.generatedAt || centralPodcasts?.generatedAt || feedBlogs?.generatedAt || null
     },
 
-    // Prompts — the LLM reads these and follows the instructions
     prompts,
-
-    // Non-fatal errors
     errors: errors.length > 0 ? errors : undefined
   };
 
