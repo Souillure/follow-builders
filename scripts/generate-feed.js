@@ -205,6 +205,7 @@ async function fetchPodcastContent(podcasts, apiKey, state, errors) {
     results.push({
       source: 'podcast',
       name: selected.podcast.name,
+      channelName: selected.podcast.name,
       title: selected.title,
       videoId: selected.videoId,
       url: selected.url,
